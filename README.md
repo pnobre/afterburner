@@ -43,9 +43,12 @@ helps to develop and debug the PLD desgins on GAL/PEEL ICs. See Discussions for
 more information.**
 
 **Update: ver.0.6.0 added experimental support for ATF1502AS and ATF1504AS. Only
-identify, erase and write commands are supported. Read function is unsupported.
-Verification is usually done automatically - it is a part of the .xsvf JTAG file
-which is used when writing the design. See Discussions for more information**
+identify, erase and write commands are supported. Verification is usually done
+automatically - it is a part of the .xsvf JTAG file which is used when writing the
+design. The fuse map of the IC can be read and saved as a .jed file:
+`./afterburner r -t ATF1504AS > my.jed` (needs xsvf/read_ATF1504AS.xsvf, see
+utils/jtag/readsvf.py). A read protected IC cannot be read.
+See Discussions for more information**
 
 **Update: ver.0.5.8 improved calibration alogrithm and resolution for mcp4151 digi pot.
 Please re-calibrate your Afterburner as the previsouly stored calibration data are invalid.**

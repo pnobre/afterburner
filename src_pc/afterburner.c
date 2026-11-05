@@ -1331,6 +1331,36 @@ static int readJtagSerialLine(char* buf, int bufSize, int maxDelay, int* feedReq
     return bufPos;
 }
 
+// Rows of the fuse array of an ATF150X as they are read: the MCU sends the TDO data of
+// each scan as T<number of bits>:<hex>. The data is stored in the order of the XSVF file.
+#define JTAG_MAX_ROWS 220
+#define JTAG_MAX_ROW_BYTES 21
+
+static unsigned char jtagRows[JTAG_MAX_ROWS][JTAG_MAX_ROW_BYTES];
+static int jtagRowBits[JTAG_MAX_ROWS];
+static int jtagRowCount = 0;
+static int jtagLastScanBits = 0;
+
+static void storeJtagRow(char* line) {
+    char* hex = strchr(line, ':');
+    int bits = atoi(line);
+    int bytes = (bits + 7) / 8;
+    int i;
+    int afterAddress = (jtagLastScanBits == 11);
+
+    jtagLastScanBits = bits;
+    // a row is the scan that follows the scan of its address (11 bits), the other scans are not rows
+    if (hex == NULL || !afterAddress || bits == 11 || bytes > JTAG_MAX_ROW_BYTES || jtagRowCount >= JTAG_MAX_ROWS) {
+        return;
+    }
+    for (i = 0; i < bytes; i++) {
+        unsigned int b = 0;
+        sscanf(hex + 1 + 2 * i, "%2x", &b);
+        jtagRows[jtagRowCount][i] = b;
+    }
+    jtagRowBits[jtagRowCount++] = bits;
+}
+
 static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
     char buf[MAX_LINE] = {0};
     int sendPos = 0;
@@ -1354,7 +1384,7 @@ static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
     }
 
     // send start-JTAG-player command
-    sprintf(buf, "j%d\r", vpp ? 1: 0);
+    sprintf(buf, "j%d\r", vpp);
     sendBuffer(buf);
 
     // read response from MCU and feed the XSVF player with data
@@ -1397,6 +1427,10 @@ static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
         }
         // when the feed request was detected, there might be still some data in the buffer
         if (buf[0] != 0) {
+            // data of a scan (read operation)
+            if (buf[0] == 'T') {
+                storeJtagRow(buf + 1);
+            } else
             //prevous line had a feed request - this is a continuation
             if (feedRequest == 0 && continuePrinting) {
                 continuePrinting = 0;
@@ -1430,7 +1464,8 @@ static int playJtagFile(char* label, int fSize, int vpp, int showProgress) {
             // print important messages
             if (buf[0] == '!') {
                 // in verbose mode print all messages, otherwise print only success or fail messages
-                if (verbose || 0 == strcmp("!Success", buf) || 0 == strcmp("!Fail", buf)) {
+                // (none when reading: the JEDEC file is printed instead)
+                if (vpp != 2 && (verbose || 0 == strcmp("!Success", buf) || 0 == strcmp("!Fail", buf))) {
                     printf("%s\n", buf + 1);
                 }
             }
@@ -1529,14 +1564,199 @@ static int processJtagWrite(void) {
 }
 
 
+// Address of the n-th row read from an ATF150X, in the order of the XSVF file (see utils/jtag/device.py).
+static int jtagRowAddress(int n) {
+    int wideEnd = (gal == ATF1504AS) ? 233 : 229;
+
+    if (n < 108) {
+        return n;
+    }
+    n -= 108;
+    if (n < wideEnd - 128) {
+        return 128 + n;
+    }
+    return 256 * (n - (wideEnd - 128) + 1);
+}
+
+// Width of a row in bits.
+static int jtagRowWidth(int address) {
+    if (address == 256) {
+        return 32;
+    }
+    if (address == 512) {
+        return 4;
+    }
+    if (address == 768) {
+        return 16;
+    }
+    return (gal == ATF1504AS) ? 166 : 86;
+}
+
+// Bit of a row that was read: the first bit shifted out is the lowest bit of the last byte.
+static int jtagRowBit(int idx, int col) {
+    int bytes = (jtagRowBits[idx] + 7) / 8;
+
+    return (jtagRows[idx][bytes - 1 - col / 8] >> (col % 8)) & 1;
+}
+
+// Position of a fuse of the JEDEC map in the rows. Returns 0 for the reserved fuses.
+static int jtagFuseToRow(int fuse, int* row, int* col) {
+    if (gal == ATF1504AS) {
+        if (fuse < 15360) {
+            *row = 12 + fuse % 96;
+            *col = 165 - fuse / 96;
+        } else if (fuse < 30720) {
+            fuse -= 15360;
+            *row = 128 + fuse % 96;
+            *col = 165 - fuse / 96;
+        } else if (fuse < 32640) {
+            fuse -= 30720;
+            *row = fuse / 160;
+            *col = 165 - fuse % 160;
+        } else if (fuse < 34134) {
+            fuse -= 32640;
+            *row = 224 + fuse % 9;
+            *col = 165 - fuse / 9;
+        } else if (fuse < 34166) {
+            *row = 256;
+            *col = 31 - (fuse - 34134);
+        } else if (fuse < 34170) {
+            *row = 512;
+            *col = 3 - (fuse - 34166);
+        } else if (fuse < 34186) {
+            *row = 768;
+            *col = 15 - (fuse - 34170);
+        } else {
+            return 0;
+        }
+        return 1;
+    }
+    // ATF1502AS
+    if (fuse < 7680) {
+        *row = 12 + fuse % 96;
+        *col = 79 - fuse / 96;
+    } else if (fuse < 15360) {
+        fuse -= 7680;
+        *row = 128 + fuse % 96;
+        *col = 79 - fuse / 96;
+    } else if (fuse < 16320) {
+        fuse -= 15360;
+        *row = fuse / 80;
+        *col = 79 - fuse % 80;
+    } else if (fuse < 16720) {
+        fuse -= 16320;
+        *row = 224 + fuse % 5;
+        *col = 79 - fuse / 5;
+    } else if (fuse < 16750) {
+        fuse -= 16320;
+        *row = 224 + fuse % 5;
+        *col = 165 - fuse / 5;
+    } else if (fuse < 16782) {
+        *row = 256;
+        *col = 31 - (fuse - 16750);
+    } else if (fuse < 16786) {
+        *row = 512;
+        *col = 3 - (fuse - 16782);
+    } else if (fuse < 16802) {
+        *row = 768;
+        *col = 15 - (fuse - 16786);
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
+// Prints the rows that were read as a JEDEC file.
+// the JEDEC of a read goes here, everything else printed during the read goes to stderr (see main)
+static FILE* jedecOut;
+
+static int printJtagJedec(void) {
+    int i, row, col;
+    int fuseCount = (gal == ATF1504AS) ? 34192 : 16808;
+    int rowCount = 108 + ((gal == ATF1504AS) ? 233 : 229) - 128 + 3;
+    int rowIndex[769];
+    unsigned int checksum = 0;
+
+    if (jtagRowCount != rowCount) {
+        fprintf(stderr, "error: received %d rows, expected %d\n", jtagRowCount, rowCount);
+        return 1;
+    }
+
+    for (i = 0; i < 769; i++) {
+        rowIndex[i] = -1;
+    }
+    for (i = 0; i < rowCount; i++) {
+        int address = jtagRowAddress(i);
+
+        if (jtagRowBits[i] != jtagRowWidth(address)) {
+            fprintf(stderr, "error: row %d has %d bits, expected %d\n", address, jtagRowBits[i], jtagRowWidth(address));
+            return 1;
+        }
+        rowIndex[address] = i;
+    }
+
+    fprintf(jedecOut, "JEDEC file for %s*QF%d*QV0*F0*G0*X0*\n", galinfo[gal].name, fuseCount);
+    for (i = 0; i < fuseCount; i++) {
+        // the reserved fuses are not in a row, JEDEC files of the fitters have them 0
+        int bit = 0;
+
+        if (jtagFuseToRow(i, &row, &col)) {
+            bit = jtagRowBit(rowIndex[row], col);
+        }
+        if (i % 32 == 0) {
+            fprintf(jedecOut, "L%05d ", i);
+        }
+        fprintf(jedecOut, "%d", bit);
+        if (i % 32 == 31 || i == fuseCount - 1) {
+            fprintf(jedecOut, "*\n");
+        }
+        if (bit) {
+            checksum += 1 << (i % 8);
+        }
+    }
+    fprintf(jedecOut, "C%04X\n*\n", checksum & 0xFFFF);
+    fflush(jedecOut);
+    return 0;
+}
+
+static int processJtagRead(void) {
+    int result;
+    int fSize = 0;
+    char tmp[256];
+    char* originalFname = filename;
+
+    if (!opRead) {
+        return 0;
+    }
+    sprintf(tmp, "xsvf/read_%s.xsvf", galinfo[gal].name);
+    filename = tmp;
+    result = readFile(&fSize);
+    filename = originalFname;
+    if (result) {
+        return result;
+    }
+
+    jtagRowCount = 0;
+    jtagLastScanBits = 0;
+    result = playJtagFile("", fSize, 2, 0);
+    if (result) {
+        return result;
+    }
+    result = printJtagJedec();
+    if (0 == result) {
+        fprintf(stderr, "Success\n");
+    }
+    return result;
+}
+
 static int processJtag(void) {
     int result;
     if (verbose) {
         printf("JTAG\n");
     }
 
-    if ((gal == ATF1502AS || gal == ATF1504AS) && (opRead || opVerify)) {
-        printf("error: read and verify operation is not supported\n");
+    if ((gal == ATF1502AS || gal == ATF1504AS) && opVerify) {
+        printf("error: verify operation is not supported (writing verifies the data)\n");
         return 1;
     }
 
@@ -1551,6 +1771,11 @@ static int processJtag(void) {
     }
 
     result = processJtagWrite();
+    if (result) {
+        return result;
+    }
+
+    result = processJtagRead();
     if (result) {
         return result;
     }
@@ -1621,6 +1846,13 @@ int main(int argc, char** argv) {
     result = checkArgs(argc, argv);
     if (result) {
         return result;
+    }
+    // when reading a JTAG device keep the real stdout for the JEDEC only
+    jedecOut = stdout;
+    if (opRead && (gal == ATF1502AS || gal == ATF1504AS)) {
+        fflush(stdout);
+        jedecOut = fdopen(dup(1), "w");
+        dup2(2, 1);
     }
     if (verbose) {
         printf("Afterburner " VERSION " \n");
