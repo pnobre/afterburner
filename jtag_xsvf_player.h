@@ -37,7 +37,7 @@ Arduino usage:
   jport.vref = 10;
 
   //process XSVF data received from serial port
-  jtag_play_xsvf(&jport);
+  jtag_play_xsvf(&jport, 0);
 
 */
 
@@ -215,6 +215,8 @@ typedef struct xsvf_t {
   uint16_t instruction_counter;
   uint8_t  error;
   uint8_t  xcomplete;
+  // report the TDO data of every scan to the host (used to read a device)
+  uint8_t  dump;
 
   uint16_t sirsize_bits;
   uint16_t sirsize_bytes;
@@ -574,6 +576,23 @@ static void xsvf_jtag_sir(jtag_port_t* port) {
 }
 
 
+// sends the TDO data of the last scan: T<number of bits>:<hex>, the first bit shifted out is the lowest bit of the number
+static void xsvf_print_tdo(void)
+{
+  uint32_t i;
+
+  Serial.print(F("T"));
+  Serial.print(xsvf->sdrsize_bits, DEC);
+  Serial.print(F(":"));
+  for (i = 0; i < xsvf->sdrsize_bytes; i++) {
+    if (xsvf->xsvf_tdo[i] < 16) {
+      Serial.print(F("0"));
+    }
+    Serial.print(xsvf->xsvf_tdo[i], HEX);
+  }
+  Serial.println();
+}
+
 static uint8_t xsvf_jtag_is_tdo_as_expected(uint8_t use_mask)
 {
   uint32_t i;
@@ -643,6 +662,9 @@ static uint8_t xsvf_jtag_sdr(jtag_port_t* port, uint8_t flags)
       }
 #endif
 		}
+	}
+	if (xsvf->dump) {
+		xsvf_print_tdo();
 	}
 	if (must_check && !matched) {
 		xsvf->error = ERR_DR_CHECK_FAILED;
@@ -929,12 +951,13 @@ static uint8_t xsvf_player_handle_next_instruction(jtag_port_t* port) {
 }
 
 
-static void jtag_play_xsvf(jtag_port_t* port)
+static void jtag_play_xsvf(jtag_port_t* port, uint8_t dump)
 {
   uint32_t n = 0;
   uint8_t ret;
 
   xsvf_player_init(port);
+  xsvf->dump = dump;
 
   //check xref is high
   if (!jtag_port_get_veref(port)) {

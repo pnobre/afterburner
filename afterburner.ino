@@ -2799,7 +2799,7 @@ static void calibrateVpp(void) {
 }
 
 #if USE_JTAG_PLAYER
-static void startJtagPlayer(uint8_t vpp) {
+static void startJtagPlayer(uint8_t vpp, uint8_t dump) {
   jtag_port_t jport;
   //assign jtag pins
   jport.tms = 12;
@@ -2818,7 +2818,7 @@ static void startJtagPlayer(uint8_t vpp) {
   }
 
   // start XSVF player / processor
-  jtag_play_xsvf(&jport);
+  jtag_play_xsvf(&jport, dump);
 
   // unset VPP
   if (varVppExists) {
@@ -3030,7 +3030,8 @@ void loop() {
       } break;
 #if USE_JTAG_PLAYER
       case COMMAND_JTAG_PLAYER: {
-        startJtagPlayer(line[1] == '1');
+        // j0: low VPP, j1: high VPP, j2: low VPP and report the TDO data of the scans
+        startJtagPlayer(line[1] == '1', line[1] == '2');
         //flush the serial line in case the player ended abruptly
         readGarbage();
       } break;
